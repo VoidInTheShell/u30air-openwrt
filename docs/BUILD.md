@@ -46,10 +46,16 @@ comparer is tested against, and what the updaters and installers released before
 
 **Releasing from GitHub Actions.** The same release, built on a GitHub arm64 runner: Actions > Release > Run workflow,
 with the ref `main` (the job refuses any other ref, and a tag or release that already exists), the tag left empty (the
-workflow takes `make-release.sh --next-tag`; a tag given must be `vYYYY.MM.DD.N` of today), and prerelease left on. It builds the 5.4 kernel, the mainline 6.18, 7.2 and 7.3 kernels and their modules (about an hour the first time;
-about five minutes while the kernel outputs are still in the Actions cache, which they are until `kernel/`, `upstream/`
-or the newest kernel.org version changes), runs `tools/make-release.sh --publish --prerelease` and dispatches the Magisk
-zips. Then try the prerelease on a device (`tools/smoke.py`, the smoke test: [RELEASING.md](RELEASING.md)), edit its notes, and promote it with
+workflow takes `make-release.sh --next-tag`; a tag given must be `vYYYY.MM.DD.N` of today). By default `publish` is off:
+it builds and audits the firmware, then uploads `u30air-firmware-<tag>-<run id>` to the run's Artifacts for seven days.
+An unsigned build artifact is for manual testing, not a signed release that the updater can accept. This mode does
+not need a signing secret, create a release/tag, or dispatch Magisk installers. It builds the 5.4 kernel, the mainline
+6.18, 7.2 and 7.3 kernels and their modules (about an hour the first time; about five minutes while the kernel outputs
+are still in the Actions cache, which they are until `kernel/`, `upstream/` or the newest kernel.org version changes).
+To publish, turn `publish` on and leave `prerelease` on. This requires `MU300_RELEASE_KEY` to match the committed public
+key; the workflow checks it before compiling, runs `tools/make-release.sh --publish --prerelease`, and dispatches the
+Magisk zips. A fork must provision its own matching signing key/public key before publishing, not remove signature
+verification or reuse an upstream public key without its private key. Then try the prerelease on a device (`tools/smoke.py`, the smoke test: [RELEASING.md](RELEASING.md)), edit its notes, and promote it with
 `gh release edit TAG --prerelease=false --latest`: only then do the installers and `mu300-update` offer it. A release the
 workflow made has no `tools/gpu/cltest` (it is built locally against Android's libraries and is not in the repository;
 `make-release.sh` includes it only when it is there), so `mu300-toolkit`'s GPU stress item is absent on such a release;
