@@ -23,7 +23,8 @@ WEB = TOP / 'tools/android-web.sh'
 SWITCH = TOP / 'android/magisk/mu300-linux-switch'
 STAGED = {'android-web.sh': WEB, 'storage.sh': TOP / 'tools/storage.sh',
           'android-boot-image.sh': TOP / 'tools/android-boot-image.sh',
-          'android-mount-mu300root.sh': TOP / 'tools/android-mount-mu300root.sh', 'switch.sh': SWITCH / 'switch.sh'}
+          'android-mount-mu300root.sh': TOP / 'tools/android-mount-mu300root.sh', 'android-usb.sh': TOP / 'tools/android-usb.sh',
+          'switch.sh': SWITCH / 'switch.sh'}
 # the device's shell for storage.sh: device paths point into the fake device, and what comes back names the device's
 # own paths again (sd_probe's /dev/block/mmcblk1 is checked by its name before it is erased)
 DEVSH = r'''#!/bin/sh
@@ -808,6 +809,29 @@ class Clean(WebCase):
         self.assertTrue(dead.exists())
 
 
+class Usb(WebCase):
+    """usb: MTP off for this boot of Android (tools/android-usb.sh, tests/test_usb_adb.py), its answer for the page"""
+
+    def test_mtp_off_and_the_answer_for_the_page(self):
+        props, log = self.tmp / 'props', self.tmp / 'setprop.log'
+        props.mkdir(exist_ok=True)
+        self.stub('getprop', f'cat "{props}/$1" 2>/dev/null; echo')
+        self.stub('setprop', f'echo "$1=$2" >> "{log}"; printf %s "$2" > "{props}/$1"; '
+                             f'[ "$1" != sys.usb.config ] || printf %s "$2" > "{props}/sys.usb.state"')
+        (self.tmp / 'boot_id').write_text('b1\n')
+        env = dict(MU300_GETPROP=self.stubs / 'getprop', MU300_SETPROP=self.stubs / 'setprop',
+                   MU300_BOOT_ID=self.tmp / 'boot_id', MU300_USB_DETACH='0', MU300_USB_DELAY='0')
+        for cfg, want, sets in (('ecm,mtp,adb', 'switch ecm,mtp,adb b1', ['sys.usb.config=none', 'sys.usb.config=adb']),
+                                ('adb', 'keep adb b1', [])):
+            (props / 'sys.usb.config').write_text(cfg)
+            if log.exists():
+                log.unlink()
+            r = self.web('usb', **env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(r.stdout.strip(), 'MU300-WEB-USB ' + want)
+            self.assertEqual(log.read_text().split() if log.exists() else [], sets)
+
+
 class BootLinux(WebCase):
     def test_only_with_linux_on_the_other_slot(self):
         self.assertIn('MU300-WEB-ERROR no-linux', self.web('boot-linux').stdout)
@@ -894,7 +918,8 @@ class Fetch(FetchCase):
         self.assertNotIn(r'\|', code)
         w = self.wget(f'{self.SAYS}exit 1')
         for system in ('openwrt', 'openwrt-luci', 'ubuntu-24.04', 'ubuntu-26.04'):
-            for k in ('5.4', '6.18', '7.2'):
+            # (7.2 is retired; the zips of the releases that had it are still release zips)
+            for k in ('5.4', '6.18', '7.2', '7.3'):
                 for t in ('v2026.10.25', 'v2026.11.01_2', 'v1'):
                     r = self.web('run', 'fetch', f'mu300-magisk-{t}-{system}-k{k}.zip', 10, MU300_WGET=w)
                     self.assertEqual(r.stdout.strip(), 'MU300-WEB-JOB started fetch', f'{t} {system} {k}: {r.stdout}')
@@ -1243,6 +1268,7 @@ class Links(WebCase):
         uses = [l.strip() for l in WEB.read_text().splitlines() if re.search(r'\$S(/|"|\b)', l) and not l.lstrip().startswith('#')]
         for l in uses:
             ok = (re.search(r'\. "\$S/[a-z-]+\.sh"', l) or re.search(r'"\$S/(android-mount-mu300root|switch)\.sh"', l) or
+                  re.search(r'\\"\$S/android-usb\.sh\\" adb-only', l) or
                   l.startswith('S=${MU300_WEB_STAGE') or l.startswith('[ ! -L "$S" ] && [ ! -L "$S/in" ]') or
                   l.startswith('mv "$S/in/$1" "$_b"'))
             self.assertTrue(ok, l)

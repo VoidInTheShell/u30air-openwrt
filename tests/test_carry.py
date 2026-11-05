@@ -620,7 +620,7 @@ class Carry(CarryCase):
 
         def check(old, new, report, r):
             self.assertTrue((new / 'etc/motd').exists())
-            self.assertIn('Packages you had removed are part of the image, and back (their services are not enabled):\n  extra\n', report)
+            self.assertIn('Packages you had removed are part of the image, and back (their services are as the previous system had them):\n  extra\n', report)
             self.assertNotIn('Deleted again', report)
         self.each(user, check, new_image=new_image)
 
@@ -899,8 +899,10 @@ class Carry(CarryCase):
                      'www/index.html': '<html>', 'etc/apk/world': 'base\n', 'lib/modules/5.4/a.ko': 'ko', 'etc/sysctl.conf': '# d\n',
                      'lib/apk/db/installed': 'P:base\nF:etc\nR:banner\nR:sysctl.conf\nF:etc/init.d\nR:dnsmasq\nF:www\nR:index.html\n',
                      'lib/apk/packages/base.conffiles': '/etc/sysctl.conf\n/etc/config/\n', 'opt/mu300/lib/path-commands': 'mu300-update\n'}
+        old_image['etc/apk/repositories.d/distfeeds.list'] = 'https://downloads.openwrt.org/releases/25.12.5/targets/armsr/armv8/kmods/6.12.94-1-aa/packages.adb\n'
         new_image = dict(old_image)
-        new_image.update({'etc/mu300/image-version': 'v2\n', 'etc/init.d/dnsmasq': ('f', '#!/bin/sh\n# v2\n', 0o755), 'etc/config/sqm': 'config queue\n'})
+        new_image.update({'etc/mu300/image-version': 'v2\n', 'etc/init.d/dnsmasq': ('f', '#!/bin/sh\n# v2\n', 0o755), 'etc/config/sqm': 'config queue\n',
+                          'etc/apk/repositories.d/distfeeds.list': 'https://downloads.openwrt.org/releases/25.12.6/targets/armsr/armv8/kmods/6.12.112-1-bb/packages.adb\n'})
 
         def user(old):
             (old / 'etc/config/network').write_text("config interface 'lan'\n\toption ipaddr '10.0.0.1'\n")
@@ -913,6 +915,9 @@ class Carry(CarryCase):
             (old / 'etc/rc.d/S50cron').unlink()                                          # a service disabled
             (old / 'etc/uci-defaults/90-mu300').unlink()                                 # ran, and removed itself
             (old / 'etc/banner').unlink()
+            # another mirror (#420): the user's feeds, of the release the old image had
+            (old / 'etc/apk/repositories.d/distfeeds.list').write_text(
+                'https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/kmods/6.12.94-1-aa/packages.adb\n')
             with open(old / 'etc/apk/world', 'a') as f:
                 f.write('userpkg\n')
             with open(old / 'lib/apk/db/installed', 'a') as f:
@@ -942,6 +947,10 @@ class Carry(CarryCase):
             self.assertEqual((new / 'etc/mu300/orphaned-config/etc/config/userpkg').read_text(), 'config main\n')
             self.assertFalse((new / 'etc/config/userpkg').exists())
             self.assertIn('/etc/config/userpkg -> /etc/mu300/orphaned-config/etc/config/userpkg', report)
+            # the mirror is the user's, the release and its kmods the new image's
+            self.assertEqual((new / 'etc/apk/repositories.d/distfeeds.list').read_text(),
+                             'https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.6/targets/armsr/armv8/kmods/6.12.112-1-bb/packages.adb\n')
+            self.assertIn('follow the new release, 25.12.6', r.stdout)
         self.each(user, check, old_image=old_image, new_image=new_image, image='openwrt', os_name='openwrt')
 
     def test_with_busybox_for_every_command(self):
@@ -1105,8 +1114,59 @@ class NeverLessProtected(CarryCase):
         def check(old, new, report, r):
             self.assertTrue((new / 'usr/lib/systemd/system/telnet.service').exists())
             self.assertFalse(os.path.lexists(new / 'etc/systemd/system/multi-user.target.wants/telnet.service'))
-            self.assertRegex(report, r'Packages you had removed are part of the image, and back \(their services are not enabled\):\n  telnetd\n')
+            self.assertRegex(report, r'Packages you had removed are part of the image, and back \(their services are as the previous system had them\):\n  telnetd\n')
         self.each(user, check, old_image=SEC_OLD, new_image=new_image)
+
+    def replaced(self, enabled):
+        """(what the device did, the old image, the new image) of the case dnsmasq-full for dnsmasq: the image's
+        package was replaced by another one of the device that provides the same service, its service is enabled
+        (or the user had it off), and the file the other package does not have went with the package it replaced"""
+        old_image = dict(SEC_OLD)
+        old_image.update({'usr/share/extra/notes': 'the notes of the package\n'})
+        new_image = dict(SEC_NEW)
+        new_image.update({'usr/share/extra/notes': 'the notes of the package\n',
+                          'var/lib/dpkg/info/extra.list': '/.\n/usr/lib/systemd/system/telnet.service\n/usr/share/extra/notes\n',
+                          'var/lib/dpkg/status': 'Package: base\nStatus: install ok installed\n\nPackage: extra\nStatus: install ok installed\n'})
+
+        def user(old):
+            # the package the image had is not installed: another one of the device provides its service (and the
+            # service is enabled); the file the other package does not have went with the package it replaced
+            build(old, {'var/lib/dpkg/info/extra-alt.list': '/.\n/usr/lib/systemd/system/telnet.service\n',
+                        'var/lib/apt/extended_states': 'Package: extra-alt\nArchitecture: amd64\nAuto-Installed: 1\n',
+                        'var/lib/dpkg/status': 'Package: base\nStatus: install ok installed\n\n'
+                                               'Package: extra-alt\nStatus: install ok installed\n'})
+            (old / 'usr/share/extra/notes').unlink()
+            if not enabled:
+                (old / 'etc/systemd/system/multi-user.target.wants/telnet.service').unlink()
+        return user, old_image, new_image
+
+    def test_a_replaced_package_keeps_its_service_enabled(self):
+        # the previous system ran the service of the package the image had (from the package that replaced it): the
+        # update must keep it enabled, or the device boot has no DHCP and no DNS on its bridges
+        user, old_image, new_image = self.replaced(True)
+
+        def check(old, new, report, r):
+            self.assertTrue((new / 'usr/lib/systemd/system/telnet.service').exists())
+            link = new / 'etc/systemd/system/multi-user.target.wants/telnet.service'
+            self.assertTrue(os.path.lexists(link))
+            self.assertEqual(os.readlink(link), '/usr/lib/systemd/system/telnet.service')
+            self.assertTrue((new / 'usr/share/extra/notes').exists())       # the package is back with its files
+            self.assertIn('Packages you had removed are part of the image, and back (their services are as the '
+                          'previous system had them):\n  extra\n', report)
+            self.assertNotIn('Deleted again', report)
+        self.each(user, check, old_image=old_image, new_image=new_image)
+
+    def test_a_replaced_package_keeps_its_service_disabled(self):
+        # the same, but the user had the service off in the previous system: it stays off, though the image enables it
+        user, old_image, new_image = self.replaced(False)
+
+        def check(old, new, report, r):
+            self.assertFalse(os.path.lexists(new / 'etc/systemd/system/multi-user.target.wants/telnet.service'))
+            self.assertIn('Packages you had removed are part of the image, and back (their services are as the '
+                          'previous system had them):\n  extra\n', report)
+            self.assertRegex(report, r'Deleted again, as you had deleted them:\n(  /.*\n)*  '
+                                     r'/etc/systemd/system/multi-user\.target\.wants/telnet\.service\n')
+        self.each(user, check, old_image=old_image, new_image=new_image)
 
 
 @unittest.skipUnless(CC and LINUX, 'needs a C compiler on Linux')

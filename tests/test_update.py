@@ -322,7 +322,8 @@ class Update(UpdateBase):
         boot = self.disk / 'boot'
         boot.mkdir()
         cases = [(None, '5.4', 'mu300-kernel.tar.gz'), ('6.18', '6.18', 'mu300-kernel-6.18.tar.gz'),
-                 ('7.2', '7.2', 'mu300-kernel-7.2.tar.gz'), ('7.3', '7.3', 'mu300-kernel-7.3.tar.gz'),
+                 # 7.2 is retired: its successor, never the 5.4 an unknown choice means (Ubuntu 26.04 does not run there)
+                 ('7.2', '7.3', 'mu300-kernel-7.3.tar.gz'), ('7.3', '7.3', 'mu300-kernel-7.3.tar.gz'),
                  ('5.4', '5.4', 'mu300-kernel.tar.gz'), ('7.4', '5.4', 'mu300-kernel.tar.gz'),
                  ('6.1', '5.4', 'mu300-kernel.tar.gz'), ('', '5.4', 'mu300-kernel.tar.gz')]
         for shell in self.each_shell():
@@ -333,6 +334,51 @@ class Update(UpdateBase):
                 else:
                     f.write_text(c + '\n')
                 self.assertEqual(self.up(shell, 'kernel_choice; kernel_asset').stdout.split(), [choice, asset], c)
+
+    def test_a_retired_kernel_is_refused_with_its_successor_and_shown_as_such(self):
+        boot = self.disk / 'boot'
+        boot.mkdir()
+        self.stub('uname', 'echo 7.2.15-mu300')
+        for shell in self.each_shell():
+            (boot / 'kernel').write_text('7.2\n')
+            r = self.up(shell, 'kernel_cmd 7.2')
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn('kernel 7.2 is retired', r.stderr)
+            self.assertIn('sudo mu300-update kernel 7.3', r.stderr)
+            # nothing is written down by the refusal
+            self.assertEqual((boot / 'kernel').read_text(), '7.2\n')
+            r = self.up(shell, 'kernel_cmd')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('kernel: 7.3 (running 7.2.15-mu300)', r.stdout)
+            self.assertIn('kernel 7.2 was chosen, and it is retired: the next update (mu300-update apply) installs 7.3', r.stdout)
+            r = self.up(shell, 'kernel_retired_note; kernel_retired_note')
+            self.assertEqual(r.stdout.count('kernel: 7.2 is retired'), 1, r.stdout)
+            self.assertIn('this device moves to 7.3', r.stdout)
+            # a kernel that is not retired says nothing, and an unknown one is not taken for a retired one
+            for c in ('7.3', '6.18', '6.6'):
+                (boot / 'kernel').write_text(c + '\n')
+                self.assertEqual(self.up(shell, 'kernel_retired_note; kernel_cmd 2>/dev/null | sed 1d').stdout, '', c)
+                self.assertNotEqual(self.up(shell, f'kernel_retired {c}').returncode, 0, c)
+            r = self.up(shell, 'kernel_cmd 7.1')
+            self.assertIn('usage: mu300-update kernel [5.4|6.18|7.3]', r.stderr)
+
+    def test_the_retired_choice_settles_only_on_an_image_of_its_successor(self):
+        boot = self.disk / 'boot'
+        boot.mkdir()
+        rel = self.tmp / 'kernel.release'
+        for shell in self.each_shell():
+            for krel, want in (('7.3.1-mu300', '7.3'), ('7.2.15-mu300', '7.2'), ('6.18.60', '7.2'), (None, '7.3')):
+                (boot / 'kernel').write_text('7.2\n')
+                rel.unlink(missing_ok=True)
+                if krel:
+                    rel.write_text(krel + '\n')
+                r = self.up(shell, f'kernel_choice_settle "{rel}"')
+                self.assertEqual((boot / 'kernel').read_text().strip(), want, krel)
+                self.assertEqual('the choice is 7.3 now (it was 7.2)' in r.stdout, want == '7.3', krel)
+            # a choice that is not retired is left alone
+            (boot / 'kernel').write_text('6.18\n')
+            self.up(shell, f'kernel_choice_settle "{rel}"')
+            self.assertEqual((boot / 'kernel').read_text(), '6.18\n')
 
     def test_byte_helpers(self):
         # the boot image header is edited with these: sizes little endian, the AVB footer big endian
@@ -526,6 +572,52 @@ class Update(UpdateBase):
 # Update's setUp, device() and up() live in UpdateBase, which has no tests; Update and FromStock both derive from it
 # (deriving from Update would run its tests twice).
 @unittest.skipIf(not HAVE_LZ4, 'neither the lz4 command nor the lz4 Python module is installed')
+class ApkFeeds(UpdateBase):
+    """#420: a distfeeds.list the user changed (another mirror) is theirs, and kept the release it was written for -
+    25.12.5 on a 25.12.6 image, whose kmods are another kernel's. Its OpenWrt feeds follow the new image's release."""
+    NEW = ('https://downloads.openwrt.org/releases/25.12.6/targets/armsr/armv8/packages/packages.adb\n'
+           'https://downloads.openwrt.org/releases/25.12.6/packages/aarch64_generic/base/packages.adb\n'
+           'https://downloads.openwrt.org/releases/25.12.6/targets/armsr/armv8/kmods/6.12.112-1-67e205f26d0458c4d12f1fd315216398/packages.adb\n')
+    USER = ('https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/packages/packages.adb\n'
+            'https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/packages/aarch64_generic/base/packages.adb\n'
+            'https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.5/targets/armsr/armv8/kmods/6.12.94-1-ba5ca7f3e73618aeece9cc1c14e512c2/packages.adb\n'
+            '# https://example.org/releases/1.0/packages/mine.adb\n'
+            'https://example.org/releases/2.1.3/mine/packages.adb\n'
+            'https://example.org/my/feed/packages.adb\n')
+
+    def test_the_users_feeds_follow_the_new_release(self):
+        f = self.disk / 'openwrt/etc/apk/repositories.d/distfeeds.list'
+        f.parent.mkdir(parents=True)
+        for shell in self.each_shell():
+            f.write_text(self.NEW)
+            r = self.up(shell, f'v=$(apk_feeds_of "{self.disk}/openwrt"); echo "[$v]"')
+            self.assertEqual(r.stdout, '[25.12.6 6.12.112-1-67e205f26d0458c4d12f1fd315216398]\n', r.stderr)
+            f.write_text(self.USER)
+            f.chmod(0o640)
+            ino = f.stat().st_ino
+            r = self.up(shell, f'apk_feeds_follow "{self.disk}/openwrt" $v; echo "rc=$?"'.replace('$v', '25.12.6 6.12.112-1-67e205f26d0458c4d12f1fd315216398'))
+            self.assertIn('rc=0', r.stdout, r.stderr)
+            self.assertIn('follow the new release, 25.12.6', r.stdout)
+            self.assertEqual(f.read_text(), self.USER.replace('/25.12.5/', '/25.12.6/').replace(
+                '6.12.94-1-ba5ca7f3e73618aeece9cc1c14e512c2', '6.12.112-1-67e205f26d0458c4d12f1fd315216398'))
+            # a new file (never written into: it may be a second name of the old system's), with the user's mode
+            self.assertNotEqual(f.stat().st_ino, ino)
+            self.assertEqual(f.stat().st_mode & 0o777, 0o640)
+            self.assertFalse(f.with_name('distfeeds.list.mu300').exists())
+            # already on the release: nothing said, nothing written
+            ino = f.stat().st_ino
+            r = self.up(shell, f'apk_feeds_follow "{self.disk}/openwrt" 25.12.6 6.12.112-1-67e205f26d0458c4d12f1fd315216398')
+            self.assertEqual((r.returncode, r.stdout), (0, ''), r.stderr)
+            self.assertEqual(f.stat().st_ino, ino)
+
+    def test_the_carry_runs_it_for_openwrt(self):
+        src = (BIN / 'mu300-update').read_text()
+        cs = src[src.index('carry_system() {'):src.index('\n}\n', src.index('carry_system() {'))]
+        self.assertIn('_cfeeds=$(apk_feeds_of "$_cn")', cs)
+        self.assertLess(cs.index('apk_feeds_of'), cs.index('carry_plan'))
+        self.assertIn('apk_feeds_follow "$_cn" $_cfeeds', cs)
+
+
 class FromStock(UpdateBase):
     """bootimg_from_stock gives the bytes boot/build-boot-image.py gives, from the same stock image, kernel and
     ramdisk: the header page of Android's image with the new sizes, loglevel=5 and no signature, its vbmeta, its
@@ -1035,7 +1127,8 @@ class KernelStep(UpdateBase):
 
     def make_bundle(self, mods, krel=None):
         p = self.src / 'mu300-kernel-6.18.tar.gz'
-        files = [('./Image', b'N' * 100 + f'Linux version {krel or self.KREL} (b@h)'.encode() + b'N' * 8000), ('./ramdisk-generic.lz4', b'\x02\x21\x4c\x18generic'),
+        files = [('./Image', b'N' * 100 + f'Linux version {krel or self.KREL} (b@h) # SMP \n\0'.encode() +
+                  f'Linux version {krel or self.KREL} (b@h) #2 SMP Mon Oct 27 10:00:00 UTC 2026\n\0'.encode() + b'N' * 8000), ('./ramdisk-generic.lz4', b'\x02\x21\x4c\x18generic'),
                  ('./devices', b'f50 u30air\n'), ('./features', b'sdcard\nlinux-slot\n'),
                  ('./kernel.release', ((krel or self.KREL) + '\n').encode()), ('./modules.builtin', b'kernel/x.ko\n'),
                  ('./kernel.config', b'CONFIG_X=y\n' * 100)]
@@ -1126,6 +1219,126 @@ class KernelStep(UpdateBase):
             self.assertEqual(self.ko(u), old)
             self.assertEqual(self.ko(o), old)
             self.assertEqual(self.ko(pm / 'ubuntu'), old)
+
+    def test_a_device_on_the_retired_7_2_gets_7_3_and_rollback_boot_brings_7_2_back(self):
+        # 7.2 is retired: a release has no mu300-kernel-7.2.tar.gz. The device that chose it gets 7.3 through the usual
+        # step (the image in the slot kept for rollback-boot), is told so, and has 7.3 written down after it
+        old = {'a.ko': b'old a'}
+        new = {'a.ko': b'new a', 'b.ko': b'new b'}
+        for shell in self.each_shell():
+            img = self.old_image(self.KREL)
+            (self.disk / 'boot/kernel').write_text('7.2\n')
+            (self.disk / 'boot/installed.kernel').write_text('7.2\n')
+            self.systems(old)
+            self.make_bundle(new, krel='7.3.1').rename(self.src / 'mu300-kernel-7.3.tar.gz')
+            r = self.run_step(shell, **self.busybox_applets(shell))
+            self.assertIn('rc=0', r.stdout, r.stderr)
+            self.assertIn('kernel: 7.2 is retired', r.stdout)
+            self.assertIn('this device moves to 7.3', r.stdout)
+            self.assertIn('kernel: the choice is 7.3 now (it was 7.2)', r.stdout)
+            self.assertIn('boot: updated to v2026.10.18.1', r.stdout)
+            self.assertEqual(self.part.read_bytes()[4096:4196], b'N' * 100)
+            self.assertEqual((self.disk / 'boot/kernel').read_text().strip(), '7.3')
+            self.assertEqual((self.disk / 'boot/installed.kernel').read_text().strip(), '7.3')
+            self.assertEqual((self.disk / 'boot/prev.kernel').read_text().strip(), '7.2')
+            # the next run says nothing of 7.2 any more
+            self.assertNotIn('retired', self.up(shell, 'kernel_retired_note').stdout)
+            r = self.up(shell, (self.STUBS % self.PSIZE) + 'rollback_boot; echo "rc=$?"', PART=self.part,
+                        MU300_NO_DEPMOD=1, **self.busybox_applets(shell))
+            self.assertIn('rc=0', r.stdout, r.stderr)
+            self.assertEqual(self.part.read_bytes()[:1 << 20], img[:1 << 20])
+            self.assertEqual((self.disk / 'boot/kernel').read_text().strip(), '7.2')
+            self.assertIn('Kernel 7.2 is retired: the next update (mu300-update apply) installs 7.3 again', r.stdout)
+            self.assertEqual(self.up(shell, 'kernel_asset').stdout.strip(), 'mu300-kernel-7.3.tar.gz')
+            (self.src / 'mu300-kernel-7.3.tar.gz').unlink()
+            for f in ('prev.body', 'prev.kernel', 'installed.kernel', 'installed.tag', 'installed.id'):
+                (self.disk / 'boot' / f).unlink(missing_ok=True)
+            shutil.rmtree(self.disk / 'boot/prev.modules', ignore_errors=True)
+
+    def test_a_restart_before_the_image_is_written_puts_the_kept_set_back(self):
+        # #422: a restart while the step ran left the systems with the new build's modules and the slot with the image
+        # before - a module of one build in the kernel of another (an Oops 25 s in). modules.pending says so, and the
+        # next mu300-update (or the ramdisk's init) puts the set of the image in the slot back
+        old = {'a.ko': b'old a', 'gone.ko': b'old gone'}
+        new = {'a.ko': b'new a', 'b.ko': b'new b'}
+        for shell in self.each_shell():
+            img = self.old_image(self.KREL)
+            self.systems(old)
+            self.kept({'a.ko': b'older a'})
+            self.make_bundle(new)
+            # the restart: right after the systems got the new set (no EXIT trap runs)
+            r = self.run_step(shell, 'prev_modules_commit() { exit 9; }; ', **self.busybox_applets(shell))
+            self.assertEqual(r.returncode, 9, r.stderr)
+            u, o = self.mod_dirs()
+            self.assertEqual(self.ko(u), new)
+            self.assertEqual(self.part.read_bytes(), img)
+            pend = (self.disk / 'boot/modules.pending').read_text().splitlines()
+            self.assertEqual(pend[0], self.KREL)
+            # the banner of the final link, not init/version.o's without build number and time
+            self.assertEqual(pend[1], f'Linux version {self.KREL} (b@h) #2 SMP Mon Oct 27 10:00:00 UTC 2026')
+            r = self.up(shell, (self.STUBS % self.PSIZE) + 'modules_settle; echo "rc=$?"', PART=self.part,
+                        MU300_NO_DEPMOD=1, **self.busybox_applets(shell))
+            self.assertIn('rc=0', r.stdout, r.stderr)
+            self.assertIn('stopped before writing its image', r.stdout)
+            self.assertEqual(self.ko(u), old)
+            self.assertEqual(self.ko(o), old)
+            self.assertFalse((self.disk / 'boot/modules.pending').exists())
+            # the kept set of the image before that is still the one it had
+            self.assertEqual(self.ko(self.disk / 'boot/prev.modules/ubuntu'), {'a.ko': b'older a'})
+            # and the next step runs as usual
+            r = self.run_step(shell, **self.busybox_applets(shell))
+            self.assertIn('rc=0', r.stdout, r.stderr)
+            self.assertEqual(self.ko(u), new)
+            self.assertFalse((self.disk / 'boot/modules.pending').exists())
+            self.assertEqual(self.leftovers(), [])
+
+    def test_a_restart_after_the_image_is_written_puts_its_set_in_again(self):
+        # the image went in, the end of the step did not (modules.pending is still there, the unpacked set too): that
+        # set goes in again, also over files a restart left empty
+        new = {'a.ko': b'new a', 'b.ko': b'new b'}
+        for shell in self.each_shell():
+            self.old_image(self.KREL)
+            self.systems({'a.ko': b'old a'})
+            self.kept({'a.ko': b'older a'})
+            self.make_bundle(new)
+            r = self.run_step(shell, **self.busybox_applets(shell))
+            self.assertIn('rc=0', r.stdout, r.stderr)
+            self.assertFalse((self.disk / 'boot/modules.pending').exists())
+            # what a restart before the end of the step leaves
+            st = self.disk / '.mu300-update/boot'
+            (st / 'modules').mkdir(parents=True)
+            for n, data in new.items():
+                (st / 'modules' / n).write_bytes(data)
+            (st / 'kernel.release').write_text(self.KREL + '\n')
+            banner = 'Linux version 6.18.57 (b@h) #2 SMP Mon Oct 27 10:00:00 UTC 2026'
+            (self.disk / 'boot/modules.pending').write_text(f'{self.KREL}\n{banner}\n')
+            self.systems({'a.ko': b'', 'b.ko': b''})
+            r = self.up(shell, (self.STUBS % self.PSIZE) + 'modules_settle; echo "rc=$?"', PART=self.part,
+                        MU300_NO_DEPMOD=1, **self.busybox_applets(shell))
+            self.assertIn('rc=0', r.stdout, r.stderr)
+            self.assertIn('stopped after writing its image', r.stdout)
+            for d in self.mod_dirs():
+                self.assertEqual(self.ko(d), new)
+            self.assertFalse((self.disk / 'boot/modules.pending').exists())
+            shutil.rmtree(st)
+
+    def test_an_unpack_that_is_not_complete_changes_nothing(self):
+        # a module missing or empty after the unpack: no system gets the set, the image stays
+        old = {'a.ko': b'old a'}
+        for shell in self.each_shell():
+            for broken in ('rm -f "$STAGE/boot/modules/b.ko"', ': > "$STAGE/boot/modules/b.ko"'):
+                img = self.old_image(self.KREL)
+                self.systems(old)
+                self.kept({'a.ko': b'older a'})
+                self.make_bundle({'a.ko': b'new a', 'b.ko': b'new b'})
+                r = self.run_step(shell, f'untar() {{ tar "$@" && {broken}; }}; ')
+                self.assertIn('rc=1', r.stdout, r.stderr)
+                self.assertIn('unpacking the modules failed; nothing was changed', r.stderr)
+                self.assertEqual(self.part.read_bytes(), img)
+                for d in self.mod_dirs():
+                    self.assertEqual(self.ko(d), old)
+                self.assertFalse((self.disk / 'boot/modules.pending').exists())
+                self.assertEqual(self.leftovers(), [])
 
     def test_too_little_room_changes_nothing_and_leaves_nothing(self):
         old = {'a.ko': b'old a'}

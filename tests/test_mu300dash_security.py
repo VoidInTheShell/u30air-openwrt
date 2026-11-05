@@ -230,6 +230,20 @@ class Mu300Dash(ShellTest):
         self.assertIsInstance(obj, dict, r.stdout)
         return obj
 
+    def test_signal_busy_when_both_channels_are_taken(self):
+        """The live signal read (locks page): cell exits 75 when both dashboard channels are taken by other readings,
+        and the reply says busy (the page keeps its reading, kanoqwq's b9f71e72); any other failure is the error."""
+        for shell in self.each_shell():
+            (self.out / 'cell.rc').write_text('75')
+            obj = self.reply(self.call(shell, 'signal')[0])
+            self.assertEqual(obj.get('busy'), 1, obj)
+            self.assertIn('busy', obj['error'])
+            (self.out / 'cell.rc').write_text('1')
+            obj = self.reply(self.call(shell, 'signal')[0])
+            self.assertNotIn('busy', obj)
+            self.assertEqual(obj['error'], 'Live signal read failed')
+            (self.out / 'cell.rc').unlink()
+
     def calls_parallel(self, shell, jobs):
         """[(label, method, params)] -> [(label, CompletedProcess, calls, stdins)], several at a time."""
         with ThreadPoolExecutor(max_workers=8) as ex:
@@ -449,6 +463,9 @@ class Refusals(Mu300Dash):
             ('traffic plan nul', 'traffic_set', {'op': 'plan', 'value': 'a\x00b'}),
             ('traffic plan 97 bytes', 'traffic_set', {'op': 'plan', 'value': 'x' * 97}),
             ('usb net role', 'usb_set', {'kind': 'net', 'value': 'host', 'scope': 'once', 'auto': '0'}),
+            ('usb net name eth0', 'usb_set', {'kind': 'net_name', 'value': 'eth0', 'scope': '', 'auto': '0'}),
+            ('usb net name mode', 'usb_set', {'kind': 'net_name', 'value': 'ncm', 'scope': '', 'auto': '0'}),
+            ('usb net name scope', 'usb_set', {'kind': 'net_name', 'value': 'eth', 'scope': 'once', 'auto': '0'}),
             ('usb iface dots', 'usb_net_add', {'iface': '..'}),
             ('usb iface slash', 'usb_net_add', {'iface': 'eth1/../x'}),
             ('usb iface 16', 'usb_net_add', {'iface': 'e' * 16}),
@@ -725,6 +742,10 @@ class Passthrough(Mu300Dash):
          [['device-usb', 'set-role', 'device', '0']]),
         ('usb_set', {'kind': 'net', 'value': 'rndis', 'scope': 'permanent', 'auto': '1'},
          [['device-usb', 'set-net', 'rndis', 'permanent', '1']]),
+        ('usb_set', {'kind': 'net', 'value': 'multi', 'scope': 'once', 'auto': '1'},
+         [['device-usb', 'set-net', 'multi', 'once', '1']]),
+        ('usb_set', {'kind': 'net_name', 'value': 'eth', 'scope': '', 'auto': '0'},
+         [['device-usb', 'set-net-name', 'eth']]),
         ('usb_net_list', {}, [['device-usb', 'net-list']]),
         ('usb_net_add', {'iface': 'eth1'}, [['device-usb', 'net-add', 'eth1']]),
         ('usb_net_add', {'iface': 'enx00e04c680001'}, [['device-usb', 'net-add', 'enx00e04c680001']]),
@@ -767,6 +788,9 @@ class Passthrough(Mu300Dash):
          [['update', 'act', 'apply', 'v2026.10.16.12', '', '', '', '', '', 'apply', '']]),
         ('update_act', {'op': 'kernel', 'kernel': '7.2', 'confirm': 'kernel'},
          [['update', 'act', 'kernel', '', '', '7.2', '', '', '', 'kernel', '']]),
+        # every kernel the updater has (#393: 7.3 was refused as an invalid request)
+        ('update_act', {'op': 'kernel', 'kernel': '7.3', 'confirm': 'kernel'},
+         [['update', 'act', 'kernel', '', '', '7.3', '', '', '', 'kernel', '']]),
         ('update_act', {'op': 'upload_begin', 'size': '52428800'},
          [['update', 'act', 'upload_begin', '', '', '', '', '52428800', '', '', '']]),
         ('update_act', {'op': 'apply_file', 'sha256': 'ab' * 32, 'flags': 'unsigned downgrade', 'confirm': 'apply'},

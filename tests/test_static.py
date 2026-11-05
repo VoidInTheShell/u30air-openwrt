@@ -494,13 +494,12 @@ class Rules(unittest.TestCase):
 
             bundle('mu300-kernel', 'sprd-dma.ko', 'virt-dma.ko')
             bundle('mu300-kernel-6.18')
-            bundle('mu300-kernel-7.2')
             bundle('mu300-kernel-7.3')
             manifest('mu300-ubuntu-rootfs', 'opt/mu300/bin/mu300-atd', 'etc/systemd/system/mu300-atd.service')
             manifest('mu300-openwrt-rootfs', 'etc/init.d/mu300-atd')
             self.assertIn('fail=0', run())
             for name, mods in (('mu300-kernel', ('audio_sipc.ko',)), ('mu300-kernel-6.18', ('sprd-dma.ko',)),
-                               ('mu300-kernel-7.2', ('snd-soc-sprd-card.ko',)), ('mu300-kernel-7.3', ('audio_mem.ko',))):
+                               ('mu300-kernel-7.3', ('snd-soc-sprd-card.ko',)), ('mu300-kernel-7.3', ('audio_mem.ko',))):
                 bundle(name, *mods)
                 out = run()
                 self.assertIn('fail=1', out, name)
@@ -886,11 +885,11 @@ class Rules(unittest.TestCase):
 
     def test_every_release_kernel_bundle_has_the_sd_host(self):
         # 5.4 reads the card as well (FINDINGS 31j): its bundle says so, and the release audit fails when any of the
-        # four bundles does not (mu300-update refuses such a bundle for a system on the card)
+        # three bundles does not (mu300-update refuses such a bundle for a system on the card)
         mr = (TOP / 'tools' / 'make-release.sh').read_text()
         self.assertIn("printf 'sdcard\\nlinux-slot\\ngpt-root\\n' > \"$K/features\"", mr)
         self.assertLess(mr.index('$K/features'), mr.index('tar -C "$K" -czf "$D/mu300-kernel.tar.gz" .'))
-        self.assertIn('for a in mu300-kernel mu300-kernel-6.18 mu300-kernel-7.2 mu300-kernel-7.3; do\n'
+        self.assertIn('for a in mu300-kernel mu300-kernel-6.18 mu300-kernel-7.3; do\n'
                       '    tar -xzOf "$D/$a.tar.gz" ./features 2>/dev/null | grep -qx sdcard', mr)
         # and that its init works with Linux on either slot (mu300-update refuses one without it on slot a)
         self.assertIn('    tar -xzOf "$D/$a.tar.gz" ./features 2>/dev/null | grep -qx linux-slot', mr)
@@ -1094,7 +1093,7 @@ class Rules(unittest.TestCase):
         # one argument: the build's own `set --` statement is run with spaces in every path
         text = (TOP / 'openwrt' / 'build-rootfs.sh').read_text()
         self.assertNotIn('$LUCI', text)
-        m = re.search(r'\n    (set -- -v "\$THEME_APK:.*?:/in/catalogs:ro")\n', text, re.S)
+        m = re.search(r'\n    (set -- -v "\$THEME_APK:.*?:/in/luci-lexical-translator.sh:ro")\n', text, re.S)
         self.assertTrue(m, 'the luci mounts are not one set -- statement')
         self.assertRegex(text, r'-v "\$REGDB":/in/regdb:ro "\$@" \\\n')
         for sh in shells():
@@ -1102,7 +1101,8 @@ class Rules(unittest.TestCase):
                                env=dict(os.environ, THEME_APK='/a b/theme.apk', TOP='/my repo', CAT='/t m/cat'))
             self.assertEqual(r.stdout.splitlines(), [
                 '-v', '/a b/theme.apk:/in/luci-theme-aurora.apk:ro', '-v', '/my repo/openwrt/luci-app-mu300:/in/luci-plugin:ro',
-                '-v', '/my repo/openwrt/luci-overlay:/in/luci-overlay:ro', '-v', '/t m/cat:/in/catalogs:ro'], sh)
+                '-v', '/my repo/openwrt/luci-overlay:/in/luci-overlay:ro', '-v', '/t m/cat:/in/catalogs:ro',
+                '-v', '/my repo/openwrt/patches/luci-lexical-translator.sh:/in/luci-lexical-translator.sh:ro'], sh)
 
     def test_openwrt_luci_starts_ndp_learn(self):
         # K37: init.d/mu300-ndp is enabled in openwrt-luci's image (it does nothing unless wan is in relay mode) and

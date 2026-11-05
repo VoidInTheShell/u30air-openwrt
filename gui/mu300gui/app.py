@@ -72,6 +72,7 @@ class App:
         # what is typed on a page but is no choice of an installation
         v['room_gib'] = tk.StringVar(self.root, value='4')
         v['room_word'] = tk.StringVar(self.root, value='')
+        v['room_method'] = tk.StringVar(self.root, value='keep')
         v['release_mode'] = tk.StringVar(self.root, value='latest')     # latest | beta | tag
         v['release_tag'] = tk.StringVar(self.root, value='')
         for name in ('release_mode', 'release_tag'):
@@ -618,22 +619,40 @@ class App:
             ttk.Label(i, text=_('userdata fills the disk, and there is not enough to share: {1} in all, of which Android needs at least {2}. Nothing can be changed here; an SD card is the other way (F50).',
                                 size(room['total']), size(room['min_android'])), style='Warn.TLabel', wraplength=660, justify='left').pack(anchor='w')
             return
-        ttk.Label(i, text=_('userdata fills the whole disk, so there is nowhere to put Linux. The installer can shrink userdata - only userdata, the last partition, so nothing else moves. This rewrites the partition table and ERASES everything in Android: apps, photos, accounts, settings. It is experimental.'),
+        online = room.get('online')
+        if not online:
+            self.v['room_method'].set('reset')
+        keep = self.v['room_method'].get() == 'keep'
+        ttk.Label(i, text=_('userdata fills the whole disk, so there is nowhere to put Linux. The installer can shrink userdata - only userdata, the last partition, so nothing else moves. This rewrites the partition table. It is experimental.'),
                   style='Warn.TLabel', wraplength=660, justify='left').pack(anchor='w')
         facts(i, [(_('userdata now'), size(room['userdata'])), (_('To share'), size(room['total'])),
                   (_('Linux can get'), _('{1} to {2}', size(room['min']), size(room['max']))),
                   (_('Android keeps at least'), size(room['min_android']))], style='Warn').pack(fill='x', pady=S3)
+        r1 = ttk.Radiobutton(i, text=_('Keep Android\'s data: shrink it while Android runs, then restart once ({1} in use; method: dikeckaan, implementation: kanoqwq)', size(room['used'])),
+                             value='keep', variable=self.v['room_method'], style='Card.TRadiobutton', command=self.render)
+        r1.pack(anchor='w')
+        if not online:
+            r1.state(['disabled'])
+            ttk.Label(i, text=_('Not possible on this device: {1}', room['online_reason'] or '?'), style='Warn.Muted.TLabel',
+                      wraplength=640, justify='left').pack(anchor='w', padx=(S4, 0))
+        ttk.Radiobutton(i, text=_('Reset Android: ERASES everything in Android (apps, photos, accounts, settings)'),
+                        value='reset', variable=self.v['room_method'], style='Card.TRadiobutton', command=self.render).pack(anchor='w')
         line = ttk.Frame(i, style='Warn.TFrame')
-        line.pack(anchor='w')
+        line.pack(anchor='w', pady=(S2, 0))
         ttk.Label(line, text=_('GiB for Linux:'), style='Warn.TLabel').pack(side='left')
         if self.v['room_gib'].get() == '4' and room['suggest']:
             self.v['room_gib'].set(('%.1f' % (room['suggest'] / GIB)).rstrip('0').rstrip('.'))
         ttk.Entry(line, textvariable=self.v['room_gib'], width=8).pack(side='left', padx=S2)
-        ttk.Label(line, text=_('Type ERASE:'), style='Warn.TLabel').pack(side='left', padx=(S4, 0))
-        ttk.Entry(line, textvariable=self.v['room_word'], width=10).pack(side='left', padx=S2)
+        if not keep:
+            ttk.Label(line, text=_('Type ERASE:'), style='Warn.TLabel').pack(side='left', padx=(S4, 0))
+            ttk.Entry(line, textvariable=self.v['room_word'], width=10).pack(side='left', padx=S2)
         ttk.Button(i, text=_('Make room now'), style='Danger.TButton', command=self._make_room_go).pack(anchor='w', pady=(S3, 0))
-        ttk.Label(i, text=_('First the partition table, misc, boot and the boot chain are backed up to this computer, with a record of what is prepared. Then the device restarts into Android\'s own recovery, which resets Android - a factory reset, a few minutes and more than one restart. Set Android up again, turn USB debugging on and bring root back (install the Magisk app again, let Shell have root); then Refresh: the installation continues where it was prepared. EXPERIMENTAL (ported from kano\'s desktop installer).'),
-                  style='Warn.Muted.TLabel', wraplength=660, justify='left').pack(anchor='w', pady=(S2, 0))
+        if keep:
+            ttk.Label(i, text=_('First the partition table, misc, boot and the boot chain are backed up to this computer, with a record of what is prepared. Then Android\'s own kernel shrinks its data while Android runs (this can take a few minutes), the partition table is written, and Android restarts once, with everything in it kept. Then Refresh: the installation continues where it was prepared. EXPERIMENTAL.'),
+                      style='Warn.Muted.TLabel', wraplength=660, justify='left').pack(anchor='w', pady=(S2, 0))
+        else:
+            ttk.Label(i, text=_('First the partition table, misc, boot and the boot chain are backed up to this computer, with a record of what is prepared. Then the device restarts into Android\'s own recovery, which resets Android - a factory reset, a few minutes and more than one restart. Set Android up again, turn USB debugging on and bring root back (install the Magisk app again, let Shell have root); then Refresh: the installation continues where it was prepared. EXPERIMENTAL (ported from kano\'s desktop installer).'),
+                      style='Warn.Muted.TLabel', wraplength=660, justify='left').pack(anchor='w', pady=(S2, 0))
 
     def _make_room_go(self):
         try:
@@ -643,14 +662,22 @@ class App:
             return
         word = self.v['room_word'].get()
         self._show_result = True
-        if word != 'ERASE':
-            messagebox.showerror(_('Making room'), _('Type ERASE (in capitals) to allow it. Nothing was changed.'), parent=self.root)
-            return
-        if not messagebox.askyesno(_('Making room'), _('Shrink userdata to give Linux {1} GiB? Everything in Android is erased, and this cannot be undone.', self.v['room_gib'].get()),
-                                   icon='warning', default='no', parent=self.root):
-            return
+        room = make_room(self.ctl.facts) or {}
+        method = self.v['room_method'].get() if room.get('online') else None
+        if method == 'keep':
+            if not messagebox.askyesno(_('Making room'), _('Shrink userdata to give Linux {1} GiB? Android keeps its data; it restarts once afterwards.', self.v['room_gib'].get()),
+                                       icon='warning', default='no', parent=self.root):
+                return
+            word = ''
+        else:
+            if word != 'ERASE':
+                messagebox.showerror(_('Making room'), _('Type ERASE (in capitals) to allow it. Nothing was changed.'), parent=self.root)
+                return
+            if not messagebox.askyesno(_('Making room'), _('Shrink userdata to give Linux {1} GiB? Everything in Android is erased, and this cannot be undone.', self.v['room_gib'].get()),
+                                       icon='warning', default='no', parent=self.root):
+                return
         self.v['room_word'].set('')
-        if self.ctl.make_room(gib, word):
+        if self.ctl.make_room(gib, word, method=method):
             self.goto('install', [s for s, _l in WIZARD].index('install'))
 
     # ================================================================ What to install
@@ -706,7 +733,7 @@ class App:
         check(i, 'Ubuntu LTS', 'ubuntu', _('The full distribution with apt; about 500 MiB of RAM in use. Needs {1}.', size(f.need('ubuntu'))),
               enabled=not room or room >= f.need('ubuntu'))
         radio(i, _('24.04 LTS: the longest tested, supported until 2029'), 'ubuntu_version', '24.04', enabled=ch.ubuntu, indent=S5)
-        radio(i, _('26.04 LTS: the newest, supported until 2031; needs kernel 6.18, 7.2 or 7.3'), 'ubuntu_version', '26.04', enabled=ch.ubuntu, indent=S5)
+        radio(i, _('26.04 LTS: the newest, supported until 2031; needs kernel 6.18 or 7.3'), 'ubuntu_version', '26.04', enabled=ch.ubuntu, indent=S5)
         ttk.Frame(i, height=S2, style='Card.TFrame').pack()
         check(i, 'OpenWrt 25.12', 'openwrt', _('A router system with the LuCI web interface; about 140 MiB of RAM in use. Needs {1}.', size(f.need('openwrt'))))
         radio(i, _('The standard LuCI web interface'), 'openwrt_flavor', 'plain', enabled=ch.openwrt, indent=S5)
@@ -720,14 +747,13 @@ class App:
         if room and room < f.need('both'):
             ttk.Label(i, text=_('This place has {1}: both systems together need {2}.', size(room), size(f.need('both'))), style='Card.Small.TLabel').pack(anchor='w', pady=(S2, 0))
 
-        o, i = card(body, _('Kernel'), _('It can be changed later on the device: sudo mu300-update kernel 5.4|6.18|7.2|7.3'))
+        o, i = card(body, _('Kernel'), _('It can be changed later on the device: sudo mu300-update kernel 5.4|6.18|7.3'))
         add(o)
         radio(i, _('5.4  —  the vendor kernel: the longest tested, everything this project supports'), 'kernel', '5.4', enabled=ch.kernel_ok('5.4'),
-              note=None if ch.kernel_ok('5.4') else _('The ZTE V50 runs a mainline kernel only (6.18, 7.2 or 7.3).') if ch.device == 'v50'
+              note=None if ch.kernel_ok('5.4') else _('The ZTE V50 runs a mainline kernel only (6.18 or 7.3).') if ch.device == 'v50'
               else _('Not with Ubuntu 26.04: its programs use system calls that 5.4 does not have.'))
         radio(i, _('6.18  —  mainline Linux, long-term release: newer drivers and security fixes; no USB-C video output yet'), 'kernel', '6.18')
-        radio(i, _('7.2  —  mainline Linux, stable release; tested less than 6.18'), 'kernel', '7.2')
-        radio(i, _('7.3  —  the newest mainline Linux; tested less than 7.2'), 'kernel', '7.3')
+        radio(i, _('7.3  —  mainline Linux, stable release; tested less than 6.18'), 'kernel', '7.3')
 
         rel = ctl.releases
         o, i = card(body, _('Release'))
@@ -1102,7 +1128,9 @@ class App:
         if p is None or not p.finished or ctl.run is not None:
             return
         box = self.w['run-banner']
-        if kind == 'makeroom' and p.ok:
+        if kind == 'makeroom' and p.ok and getattr(ctl, 'room_method', 'reset') == 'keep':
+            banner(box, _('Room was made and Android kept its data. Android restarts once; when it is up again, press Refresh on the Device page: the installation continues where it was prepared.'), 'good').pack(fill='x', pady=(0, S3))
+        elif kind == 'makeroom' and p.ok:
             banner(box, _('Room was made. The device restarts into Android\'s recovery, which resets Android (a few minutes, more than one restart). Set Android up again, turn USB debugging on and bring root back (the Magisk app, Shell allowed); then press Refresh on the Device page: the installation continues where it was prepared.'), 'good').pack(fill='x', pady=(0, S3))
         elif kind in ('install', 'makeroom') and not p.ok:
             banner(box, _('It stopped: {1}', p.error or '?'), 'bad').pack(fill='x', pady=(0, S2))
@@ -1319,10 +1347,12 @@ class App:
                 line = ttk.Frame(i, style='Card.TFrame')
                 line.pack(anchor='w', pady=(S3, 0))
                 ttk.Label(line, text=_('Kernel:'), style='Card.TLabel').pack(side='left')
-                kbox = ttk.Combobox(line, values=['5.4', '6.18', '7.2', '7.3'], width=6, state='readonly')
+                kbox = ttk.Combobox(line, values=['5.4', '6.18', '7.3'], width=6, state='readonly')
                 # the kernel it runs, not a fixed 6.18 (seen on F50-B running 7.2.10: the box said 6.18)
                 running = info.get('kernel', '')
-                kbox.set(next((k for k in ('5.4', '6.18', '7.2', '7.3') if running == k or running.startswith(k + '.')), '6.18'))
+                # (a device still on the retired 7.2 is offered 7.3, the kernel that takes its place)
+                kbox.set(next((k for k in ('5.4', '6.18', '7.3') if running == k or running.startswith(k + '.')),
+                              '7.3' if running.startswith('7.2.') else '6.18'))
                 kbox.pack(side='left', padx=S2)
                 action(line, _('Switch to it'), lambda: self._command('kernel-' + kbox.get(), _('Install kernel {1} on the device? It restarts into it afterwards only when you restart it.', kbox.get()))).pack(side='left')
             else:

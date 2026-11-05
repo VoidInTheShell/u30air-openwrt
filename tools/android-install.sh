@@ -24,7 +24,8 @@
 #   KEEP_PW_OSES="..."  with UPDATE=1: the systems whose accounts and passwords stay exactly as they are (PWHASH and
 #                      PW_SET do not touch them); install.sh: those whose current password the user confirmed
 #   IMPORT_HOTSPOT=0|1 copy Android's hotspot SSID/passphrase into each system
-#   KERNEL=5.4|6.18|7.2|7.3  the kernel in the new boot image; mu300-update keeps installing that one (boot/kernel)
+#   KERNEL=5.4|6.18|7.3  the kernel in the new boot image; mu300-update keeps installing that one (boot/kernel). 7.2
+#                      (retired) still comes from the zips of the releases that had it: mu300-update moves it to 7.3
 #   ADB=0|1 ADB_KEY    adb over USB to each system: 1 lets in only the adb public key ADB_KEY ("BASE64 name",
 #                      etc/mu300/adb_keys; "keys" in etc/mu300/adb_auth); 0 writes nothing, and a system that was
 #                      never told otherwise has adb on for every computer (mu300-adbd)
@@ -41,6 +42,19 @@ umask 022
 # can write (MU300_DEVICE_WORK): files in /data/local/tmp can be replaced by the shell user after they were checked.
 T=${MU300_DEVICE_WORK:-/data/local/tmp}
 . $T/mu300-install.env
+# --- android-disk begin
+# The internal disk, as Android's by-name links have it: the disk that holds misc - mmcblk0 on an eMMC unit, sda on a
+# UFS one (issue #396; tools/storage.sh's internal_disk asks the same) - and what its partitions are named after
+# (mmcblk0p, sda). mmcblk0 when Android does not say; MU300_DISK names it.
+_ad=$(readlink -f "${MU300_BY_NAME:-/dev/block/by-name}/misc" 2>/dev/null) || _ad=
+_ad=$(readlink -f "${MU300_SYSFS:-/sys}/class/block/${_ad##*/}/.." 2>/dev/null) || _ad=
+IDISK=${MU300_DISK:-${_ad##*/}}
+case $IDISK in mmcblk[0-9]|sd[a-z]) ;; *) IDISK=mmcblk0 ;; esac
+case $IDISK in mmcblk*) IPART=${IDISK}p ;; *) IPART=$IDISK ;; esac
+# its logical block size, and its GPT in 512-byte sectors: the first GPT_HEAD and the last GPT_TAIL
+ILBS=$(cat "${MU300_SYSFS:-/sys}/block/$IDISK/queue/logical_block_size" 2>/dev/null) || ILBS=
+case $ILBS in 4096) GPT_HEAD=48 GPT_TAIL=40 ;; *) ILBS=512 GPT_HEAD=34 GPT_TAIL=33 ;; esac
+# --- android-disk end
 M=$T/mu300root
 say() { echo "[device] $*"; }
 # --- stage begin
@@ -173,7 +187,7 @@ sd_disk() {  # sd_disk DEV: the disk of a partition (mmcblk1p1 -> mmcblk1); a wh
 }
 sd_check() {  # sd_check DEV: DEV must be on an SD card, never on the eMMC this Android runs from
     case $1 in
-        */mmcblk0|*/mmcblk0p*) say "refusing $1: that is the internal eMMC, not the SD card"; return 1 ;;
+        */"$IDISK"|*/"$IPART"[0-9]*) say "refusing $1: that is the internal eMMC, not the SD card"; return 1 ;;
     esac
     d=$(sd_disk "$1")
     # the MMC core names the card type: SD for a memory card (the eMMC says MMC, a Wi-Fi chip SDIO)
@@ -274,13 +288,13 @@ else
 # inside the one GPT partition named mu300root: another installer's place for this filesystem (tools/storage.sh's
 # region_in_bounds, FINDINGS 179)
 end=0; pn=0; ps=0; pz=0
-for p in /sys/block/mmcblk0/mmcblk0p*; do
+for p in /sys/block/$IDISK/$IPART*; do
     e=$(( $(cat $p/start) + $(cat $p/size) ))
     [ $e -gt $end ] && end=$e
     grep -qx PARTNAME=mu300root $p/uevent 2>/dev/null && { pn=$((pn + 1)); ps=$(cat $p/start); pz=$(cat $p/size); }
 done
-disk=$(cat /sys/block/mmcblk0/size)
-if [ "$OFF_S" -ge $end ] && [ $((OFF_S + SIZE_S)) -le $((disk - 34)) ]; then :
+disk=$(cat /sys/block/$IDISK/size)
+if [ "$OFF_S" -ge $end ] && [ $((OFF_S + SIZE_S)) -le $((disk - GPT_TAIL - 1)) ]; then :
 elif [ $pn = 1 ] && [ "$OFF_S" -ge $ps ] && [ $((OFF_S + SIZE_S)) -le $((ps + pz)) ]; then
     say "the Linux filesystem goes into the GPT partition named mu300root (sectors $ps + $pz)"
 else
@@ -295,11 +309,11 @@ attach() {
     f=$(losetup -f 2>&1 | grep -o '/dev/block/loop[0-9]*' | head -1); n=${f##*loop}
     L=/dev/block/loop$n
     [ -b "$L" ] || mknod "$L" b $(cut -d: -f1 /sys/block/loop$n/dev) $(cut -d: -f2 /sys/block/loop$n/dev) 2>/dev/null || [ -b "$L" ]
-    losetup -o $OFF -S $SIZE "$L" /dev/block/mmcblk0
+    losetup -o $OFF -S $SIZE "$L" /dev/block/$IDISK
     [ "$(cat /sys/block/loop$n/loop/offset)" = "$OFF" ] && [ "$(blockdev --getsize64 $L)" = "$SIZE" ] || { losetup -d $L; say "loop setup mismatch"; exit 1; }
 }
 
-sb() { dd if=/dev/block/mmcblk0 bs=512 skip=$OFF_S count=4 2>/dev/null | dd bs=1 skip=$1 count=$2 2>/dev/null; }
+sb() { dd if=/dev/block/$IDISK bs=512 skip=$OFF_S count=4 2>/dev/null | dd bs=1 skip=$1 count=$2 2>/dev/null; }
 magic=$(sb 1080 2 | od -An -tx1 | tr -d ' \n')
 label=$(sb 1144 16 | tr -d '\000')
 if [ "$FORMAT" = 1 ]; then
@@ -543,6 +557,7 @@ fi
 # hold the two to one text. It runs on Android too: sh, awk, sed, grep, sort - nothing else, and safe under set -e.
 UPK_DIR=etc/mu300/user-packages
 UPK_ORPH=etc/mu300/orphaned-config
+UPK_APKS=etc/mu300/user-apks
 # what is never installed again: kernel modules (the feed's are for another kernel), and what the images take out on
 # purpose (sysupgrade would flash the eMMC; ujail crash-loops services on 5.4)
 upk_skip() {
@@ -738,6 +753,10 @@ upk_record() {
     fi
     if [ "${MU300_KEEP_PACKAGES:-1}" = 0 ]; then echo skipped > "$_ud/state"; else echo pending > "$_ud/state"; fi
     echo "  $(tr '\n' ' ' < "$_ud/wanted")"
+    # a package the feeds do not have, coming back from the file kept for it before the update (mu300-user-packages keep)
+    [ ! -f "$_uo/$UPK_APKS/index" ] || while read -r _kp _kv _kf; do
+        [ ! -f "$_uo/$UPK_APKS/$_kf" ] || ! grep -qxF "$_kp" "$_ud/wanted" || echo "  from a kept file: /$UPK_APKS/$_kf"
+    done < "$_uo/$UPK_APKS/index"
     if [ "$(cat "$_ud/state")" = skipped ]; then
         echo "  The new system does not have them, and they are not installed again (MU300_KEEP_PACKAGES=0 or"
         echo "  --no-reinstall; later: mu300-user-packages retry)."
@@ -1019,6 +1038,8 @@ sd_unmark $M
 echo "$BOOT_OS" > $M/.mu300/boot-os
 # --- install-os end
 case ${BOOT_ATTEMPTS:-} in [1-6]) echo "$BOOT_ATTEMPTS" > $M/.mu300/boot-attempts ;; esac
+# (7.2 too: written down as it is, it is what the image holds, and mu300-update takes it for 7.3. Left out, the choice
+# would read as 5.4, which Ubuntu 26.04 cannot run)
 case ${KERNEL:-5.4} in
     5.4|6.18|7.2|7.3) mkdir -p $M/boot; echo "${KERNEL:-5.4}" > $M/boot/kernel; echo "${KERNEL:-5.4}" > $M/boot/installed.kernel ;;
 esac
